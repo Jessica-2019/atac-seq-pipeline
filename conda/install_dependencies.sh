@@ -64,17 +64,31 @@ source activate ${CONDA_ENV}
   echo "export PYTHONNOUSERSITE=True" >> ${CONDA_ACTIVATE_SH}
   echo "unset OPENBLAS_NUM_THREADS MKL_NUM_THREADS PYTHONNOUSERSITE" > ${CONDA_DEACTIVATE_SH}
 
+  # to prevent conflict between Conda's R and global(local) R
+  echo "export R_HOME=${CONDA_LIB}/R" >> ${CONDA_ACTIVATE_SH}
+  echo "export R_LIBS=${CONDA_LIB}/R/library" >> ${CONDA_ACTIVATE_SH}
+  echo "unset R_HOME R_LIBS" > ${CONDA_DEACTIVATE_SH}
+  
   # hack around the need for both python2 and python3 in the same environment
   CONDA_BIN="${CONDA_PREFIX}/bin"
   cd ${CONDA_BIN}
   rm -f idr
   ln -s ../../${CONDA_ENV_PY3}/bin/idr
+  ln -s ../../${CONDA_ENV_PY3}/bin/python3
 
   # make an executable symlink for cromwell.jar on conda bin dir
   CONDA_SHARE="${CONDA_PREFIX}/share"
   chmod +rx ${CONDA_SHARE}/cromwell/cromwell.jar
   cd ${CONDA_BIN}
   ln -s ../share/cromwell/cromwell.jar
+
+  # make a soft link for picard.jar
+  if [ -f ${CONDA_PREFIX}/bin/picard ]; then
+    PICARD_JAR=../share/picard*/picard.jar
+    chmod +rx ${PICARD_JAR}
+    cd ${CONDA_PREFIX}/bin && ln -s ${PICARD_JAR}
+  fi
+  
 source deactivate
 
 # transfer pipeline's python scripts (src/*.py) to conda env's bin directory

@@ -46,7 +46,7 @@ def strip_ext_npeak(npeak):
 
 def strip_ext_rpeak(rpeak):
     return re.sub(r'\.(regionPeak|RegionPeak)\.gz$','',
-                    str(npeak))
+                    str(rpeak))
 
 def strip_ext_gpeak(gpeak):
     return re.sub(r'\.(gappedPeak|GappedPeak)\.gz$','',
@@ -56,9 +56,36 @@ def strip_ext_bpeak(bpeak):
     return re.sub(r'\.(broadPeak|BroadPeak)\.gz$','',
                     str(npeak))
 
+def get_peak_type(peak):
+    if strip_ext_npeak(peak)!=peak:
+        return 'narrowPeak'
+    elif strip_ext_rpeak(peak)!=peak:
+        return 'regionPeak'
+    elif strip_ext_bpeak(peak)!=peak:
+        return 'broadPeak'
+    elif strip_ext_gpeak(peak)!=peak:
+        return 'gappedPeak'
+    else:
+        raise Exception('Unsupported peak type for stripping extension {}'.format(peak))
+
+def strip_ext_peak(peak): # returns a tuple (peak_type, stripped_filename)
+    peak_type = get_peak_type(peak)
+    if peak_type=='narrowPeak':
+        return strip_ext_npeak(peak)
+    elif peak_type=='regionPeak':
+        return strip_ext_rpeak(peak)
+    elif peak_type=='broadPeak':
+        return strip_ext_bpeak(peak)
+    elif peak_type=='gappedPeak':
+        return strip_ext_gpeak(peak)
+    else:
+        raise Exception('Unsupported peak type for stripping extension {}'.format(
+            peak))
+
 def strip_ext_bigwig(bw):
     return re.sub(r'\.(bigwig|bw)$','',
                     str(bw))
+
 
 def strip_ext_gz(f):
     return re.sub(r'\.gz$','',str(f))
@@ -142,9 +169,11 @@ def get_num_lines(f):
     cmd = 'zcat -f {} | wc -l'.format(f)
     return int(run_shell_cmd(cmd))
 
-def assert_file_not_empty(f):
-    if get_num_lines(f)==0:
-        raise Exception('File is empty. {}'.format(f))
+def assert_file_not_empty(f,help=''):
+    if not os.path.exists(f):
+        raise Exception('File does not exist ({}). Help: {}'.format(f,help))
+    elif get_num_lines(f)==0:
+        raise Exception('File is empty ({}). Help: {}'.format(f,help))
 
 def write_txt(f,s):
     with open(f,'w') as fp:
@@ -199,37 +228,31 @@ def pdf2png(pdf, out_dir):
     run_shell_cmd(cmd)
     return png
 
-def run_shell_cmd(cmd): 
-    try:
-        p = subprocess.Popen(cmd, shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            universal_newlines=True,
-            preexec_fn=os.setsid)
-        pid = p.pid
-        pgid = os.getpgid(pid)
-        log.info('run_shell_cmd: PID={}, CMD={}'.format(pid, cmd))
-        ret = ''
-        while True:
-            line = p.stdout.readline()
-            if line=='' and p.poll() is not None:
-                break
-            # log.debug('PID={}: {}'.format(pid,line.strip('\n')))
-            if line:
-                print('PID={}: {}'.format(pid,line.strip('\n')))
-                ret += line
-        p.communicate() # wait here
-        if p.returncode > 0:
-            raise subprocess.CalledProcessError(
-                p.returncode, cmd)
-        return ret.strip('\n')
-    except:
+def run_shell_cmd(cmd):
+    p = subprocess.Popen(['/bin/bash','-o','pipefail'], # to catch error in pipe
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
+        preexec_fn=os.setsid) # to make a new process with a new PGID
+    pid = p.pid
+    pgid = os.getpgid(pid)
+    log.info('run_shell_cmd: PID={}, PGID={}, CMD={}'.format(pid, pgid, cmd))
+    stdout, stderr = p.communicate(cmd)
+    rc = p.returncode
+    err_str = 'PID={}, PGID={}, RC={}\nSTDERR={}\nSTDOUT={}'.format(pid, pgid, rc,
+        stderr.strip(), stdout.strip())
+    if rc:
         # kill all child processes
-        log.exception('Unknown exception caught. '+ \
-            'Killing process group {}...'.format(pgid))
-        os.killpg(pgid, signal.SIGKILL)
-        p.terminate()
-        raise Exception('Unknown exception caught. PID={}'.format(pid))
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except:
+            pass
+        finally:
+            raise Exception(err_str)
+    else:
+        log.info(err_str)
+    return stdout.strip('\n')
 
 # math
 

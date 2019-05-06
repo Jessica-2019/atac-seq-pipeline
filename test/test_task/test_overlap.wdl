@@ -22,6 +22,7 @@ workflow test_overlap {
 		peak_pooled = se_peak_pooled,
 		peak_type = 'narrowPeak',
 		blacklist = se_blacklist,
+		keep_irregular_chr_in_bfilt_peak = false,
 		chrsz = se_chrsz,
 		ta = se_ta_pooled,
 	}
@@ -32,11 +33,11 @@ workflow test_overlap {
 			'se_overlap_bfilt_peak',
 			'se_overlap_frip_qc',
 		],
-		files = [
+		files = select_all([
 			se_overlap.overlap_peak,
 			se_overlap.bfilt_overlap_peak,
 			se_overlap.frip_qc,
-		],
+		]),
 		ref_files = [
 			ref_se_overlap_peak,
 			ref_se_overlap_bfilt_peak,

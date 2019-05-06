@@ -27,6 +27,7 @@ workflow test_idr {
 		rank = 'p.value',
 		blacklist = se_blacklist,
 		chrsz = se_chrsz,
+		keep_irregular_chr_in_bfilt_peak = false,
 		ta = se_ta_pooled,
 	}
 
@@ -36,11 +37,11 @@ workflow test_idr {
 			'se_idr_bfilt_peak',
 			'se_idr_frip_qc',
 		],
-		files = [
+		files = select_all([
 			se_idr.idr_peak,
 			se_idr.bfilt_idr_peak,
 			se_idr.frip_qc,
-		],
+		]),
 		ref_files = [
 			ref_se_idr_peak,
 			ref_se_idr_bfilt_peak,

@@ -129,48 +129,66 @@ def locate_picard():
             raise Exception(msg)
             
 
-def subsample_ta_se(ta, subsample, non_mito, out_dir):
+def subsample_ta_se(ta, subsample, non_mito, mito_chr_name, out_dir):
     prefix = os.path.join(out_dir,
         os.path.basename(strip_ext_ta(ta)))
-    ta_subsampled = '{}.{}{}.tagAlign.gz'.format(
+    ta_subsampled = '{}.{}{}tagAlign.gz'.format(
         prefix,
         'no_chrM.' if non_mito else '',
-        human_readable_number(subsample))
+        '{}.'.format(human_readable_number(subsample)) if subsample>0 else ''
+        )
 
-    # use bash
-    cmd = 'bash -c "zcat -f {} | '
+    # bash-only
+    cmd = 'zcat -f {} | '
     if non_mito:
-        cmd += 'grep -v chrM | '
-    cmd += 'shuf -n {} --random-source=<(openssl enc -aes-256-ctr -pass pass:$(zcat -f {} | wc -c) -nosalt </dev/zero 2>/dev/null) | '
-    cmd += 'gzip -nc > {}"'
-    cmd = cmd.format(
-        ta,
-        subsample,
-        ta,
-        ta_subsampled)
+        # cmd += 'awk \'{{if ($1!="'+mito_chr_name+'") print $0}}\' | '
+        cmd += 'grep -v \'^'+mito_chr_name+'\\b\' | '        
+    if subsample>0:
+        cmd += 'shuf -n {} --random-source=<(openssl enc -aes-256-ctr -pass pass:$(zcat -f {} | wc -c) -nosalt </dev/zero 2>/dev/null) | '
+        cmd += 'gzip -nc > {}'
+        cmd = cmd.format(
+            ta,
+            subsample,
+            ta,
+            ta_subsampled)
+    else:
+        cmd += 'gzip -nc > {}'
+        cmd = cmd.format(
+            ta,
+            ta_subsampled)
+
     run_shell_cmd(cmd)
     return ta_subsampled
 
-def subsample_ta_pe(ta, subsample, non_mito, r1_only, out_dir):
+def subsample_ta_pe(ta, subsample, non_mito, mito_chr_name, r1_only, out_dir):
     prefix = os.path.join(out_dir,
         os.path.basename(strip_ext_ta(ta)))
-    ta_subsampled = '{}.{}{}{}.tagAlign.gz'.format(
+    ta_subsampled = '{}.{}{}{}tagAlign.gz'.format(
         prefix,
         'no_chrM.' if non_mito else '',
         'R1.' if r1_only else '',
-        human_readable_number(subsample))
+        '{}.'.format(human_readable_number(subsample)) if subsample>0 else ''
+        )
     ta_tmp = '{}.tagAlign.tmp'.format(prefix)
 
-    cmd0 = 'bash -c "zcat -f {} | '
+    cmd0 = 'zcat -f {} | '
     if non_mito:
-        cmd0 += 'grep -v chrM | '
-    cmd0 += 'sed \'N;s/\\n/\\t/\' | '
-    cmd0 += 'shuf -n {} --random-source=<(openssl enc -aes-256-ctr -pass pass:$(zcat -f {} | wc -c) -nosalt </dev/zero 2>/dev/null) > {}"'
-    cmd0 = cmd0.format(
-        ta,
-        subsample,
-        ta,
-        ta_tmp)
+        # cmd0 += 'awk \'{{if ($1!="'+mito_chr_name+'") print $0}}\' | '
+        cmd0 += 'grep -v \'^'+mito_chr_name+'\\b\' | '        
+    cmd0 += 'sed \'N;s/\\n/\\t/\' '
+    if subsample>0:
+        cmd0 += '| shuf -n {} --random-source=<(openssl enc -aes-256-ctr -pass pass:$(zcat -f {} | wc -c) -nosalt </dev/zero 2>/dev/null) > {}'
+        cmd0 = cmd0.format(
+            ta,
+            subsample,
+            ta,
+            ta_tmp)
+    else:
+        cmd0 += '> {}'
+        cmd0 = cmd0.format(
+            ta,
+            ta_tmp)
+
     run_shell_cmd(cmd0)
 
     cmd = 'cat {} | '
@@ -190,7 +208,77 @@ def subsample_ta_pe(ta, subsample, non_mito, r1_only, out_dir):
     rm_f(ta_tmp)    
     return ta_subsampled
 
-def peak_to_bigbed(peak, peak_type, chrsz, out_dir):
+# convert encode peak file to hammock (for Wash U browser track)
+def peak_to_hammock(peak, keep_irregular_chr, out_dir):
+    peak_type = get_peak_type(peak)
+    prefix = os.path.join(out_dir, os.path.basename(
+        strip_ext_peak(peak)))
+    hammock = '{}.{}.hammock'.format(prefix,peak_type)
+    hammock_tmp = '{}.tmp'.format(hammock)
+    hammock_tmp2 = '{}.tmp2'.format(hammock)
+    hammock_gz = '{}.gz'.format(hammock)
+    hammock_gz_tbi = '{}.gz.tbi'.format(hammock)
+
+    if get_num_lines(peak)==0:
+        cmd = 'zcat -f {} | gzip -nc > {}'.format(peak, hammock_gz)
+        run_shell_cmd(cmd)
+        cmd2 = 'touch {}'.format(hammock_gz_tbi)
+    else:
+        cmd = "zcat -f {} | "
+        if not keep_irregular_chr:
+            cmd += "sed '/^\(chr\)/!d' | "
+        cmd += "LC_COLLATE=C sort -k1,1V -k2,2n > {}"
+        cmd = cmd.format(peak, hammock_tmp)
+        run_shell_cmd(cmd)
+
+        with open(hammock_tmp, 'r') as fin, open(hammock_tmp2, 'w') as fout:
+            id=1
+            for line in fin:
+                lst=line.rstrip().split('\t')
+
+                if peak_type=='narrowPeak' or peak_type=='regionPeak':
+                    fout.write('{0[0]}\t{0[1]}\t{0[2]}\tscorelst:[{0[6]},{0[7]},{0[8]}],id:{1},'.format(lst,id))
+                    if len(lst[3])>1:
+                            fout.write('name:"'+lst[3]+'",')
+                    if lst[5]!='.':
+                            fout.write('strand:"'+lst[5]+'",')
+                    if lst[9]!='-1':
+                            fout.write('sbstroke:['+lst[9]+']')
+                elif peak_type=='gappedPeak':
+                    fout.write('{0[0]}\t{0[1]}\t{0[2]}\tscorelst:[{0[12]},{0[13]},{0[14]}],id:{1},struct:{{thin:[[{0[1]},{0[2]}]],thick:['.format(lst,id))
+                    a=int(lst[1])
+                    sizes=lst[10].split(',')
+                    starts=lst[11].split(',')
+                    for i in range(len(sizes)):
+                            fout.write('[{0},{1}],'.format(a+int(starts[i]),a+int(starts[i])+int(sizes[i])))
+                    fout.write(']},')
+
+                    if len(lst[3])>1:
+                            fout.write('name:"'+lst[3]+'",')
+                    if lst[5]!='.':
+                            fout.write('strand:"'+lst[5]+'",')
+                elif peak_type=='broadPeak':
+                    fout.write('{0[0]}\t{0[1]}\t{0[2]}\tscorelst:[{0[6]},{0[7]}],id:{1},'.format(lst,id))
+                    if len(lst[3])>1:
+                            fout.write('name:"'+lst[3]+'",')
+                    if lst[5]!='.':
+                            fout.write('strand:"'+lst[5]+'",')
+                else:
+                    raise Exception("Unsupported peak_type {}".format(peak))
+                id+=1
+
+                fout.write('\n')
+
+        cmd2 = 'zcat -f {} | sort -k1,1 -k2,2n | bgzip -cf > {}'
+        cmd2 = cmd2.format(hammock_tmp2, hammock_gz)
+        run_shell_cmd(cmd2)
+        cmd3 = 'tabix -f -p bed {}'.format(hammock_gz)
+        run_shell_cmd(cmd3)
+
+        rm_f([hammock, hammock_tmp, hammock_tmp2])
+    return (hammock_gz, hammock_gz_tbi)
+
+def peak_to_bigbed(peak, peak_type, chrsz, keep_irregular_chr, out_dir):
     prefix = os.path.join(out_dir,
         os.path.basename(strip_ext(peak)))
     bigbed = '{}.{}.bb'.format(prefix, peak_type)
@@ -260,9 +348,14 @@ def peak_to_bigbed(peak, peak_type, chrsz, out_dir):
     # create temporary .as file
     with open(as_file,'w') as fp: fp.write(as_file_contents)
 
-    cmd1 = "cat {} | grep -P 'chr[\dXY]+[ \\t]' > {}".format(chrsz, chrsz_tmp)
+    if not keep_irregular_chr:
+        cmd1 = "cat {} | grep -P 'chr[\\dXY]+\\b' > {}".format(chrsz, chrsz_tmp)
+    else:
+        cmd1 = "cat {} > {}".format(chrsz, chrsz_tmp)
     run_shell_cmd(cmd1)
-    cmd2 = "zcat -f {} | sort -k1,1 -k2,2n > {}".format(peak, bigbed_tmp)
+    cmd2 = "zcat -f {} | LC_COLLATE=C sort -k1,1 -k2,2n | "
+    cmd2 += 'awk \'BEGIN{{OFS="\\t"}} {{if ($5>1000) $5=1000; if ($5<0) $5=0; print $0}}\' > {}'
+    cmd2 = cmd2.format(peak, bigbed_tmp)
     run_shell_cmd(cmd2)
     cmd3 = "bedClip {} {} {}".format(bigbed_tmp, chrsz_tmp, bigbed_tmp2)
     run_shell_cmd(cmd3)
@@ -298,3 +391,16 @@ def get_read_length(fastq):
                 break
             line_num += 1
     return int(max_length)
+
+def remove_read_group(bam, out_dir='.'):
+    basename = os.path.basename(bam.rsplit('.bam',1)[0])
+    prefix = os.path.join(out_dir, basename)
+    new_bam = '{}.no_rg.bam'.format(prefix)
+
+    cmd = 'samtools view -h {} | '
+    cmd += 'grep -v "^@RG" | sed "s/\\tRG:Z:[^\\t]*//" | '
+    cmd += 'samtools view -bo {} -'
+    cmd = cmd.format(bam, new_bam)
+    run_shell_cmd(cmd)
+
+    return new_bam

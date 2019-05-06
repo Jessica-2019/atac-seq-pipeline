@@ -38,36 +38,33 @@ from encode_common_genomic import *
 
 # utils
 
-def run_shell_cmd(cmd): 
+def run_shell_cmd(cmd):
     """Taken from ENCODE DCC ATAC pipeline
     """
-    print(cmd)
-    try:
-        p = subprocess.Popen(cmd, shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            universal_newlines=True,
-            preexec_fn=os.setsid)
-        pid = p.pid
-        pgid = os.getpgid(pid)
-        ret = ''
-        while True:
-            line = p.stdout.readline()
-            if line=='' and p.poll() is not None:
-                break
-            # log.debug('PID={}: {}'.format(pid,line.strip('\n')))
-            #print('PID={}: {}'.format(pid,line.strip('\n')))
-            ret += line
-        p.communicate() # wait here
-        if p.returncode > 0:
-            raise subprocess.CalledProcessError(
-                p.returncode, cmd)
-        return ret.strip('\n')
-    except:
+    p = subprocess.Popen(['/bin/bash','-o','pipefail'], # to catch error in pipe
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
+        preexec_fn=os.setsid) # to make a new process with a new PGID
+    pid = p.pid
+    pgid = os.getpgid(pid)
+    log.info('run_shell_cmd: PID={}, PGID={}, CMD={}'.format(pid, pgid, cmd))
+    stdout, stderr = p.communicate(cmd)
+    rc = p.returncode
+    err_str = 'PID={}, PGID={}, RC={}\nSTDERR={}\nSTDOUT={}'.format(pid, pgid, rc,
+        stderr.strip(), stdout.strip())
+    if rc:
         # kill all child processes
-        os.killpg(pgid, signal.SIGKILL)
-        p.terminate()
-        raise Exception('Unknown exception caught. PID={}'.format(pid))
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except:
+            pass
+        finally:
+            raise Exception(err_str)
+    else:
+        log.info(err_str)
+    return stdout.strip('\n')
 
 def get_num_lines(f):
     """Taken from ENCODE DCC ATAC pipeline
@@ -200,22 +197,25 @@ def get_bowtie_stats(bowtie_alignment_log):
     return bowtie_text
 
 
-def get_chr_m(sorted_bam_file):
+def get_chr_m(sorted_bam_file, mito_chr_name):
     '''
     Get fraction of reads that are mitochondrial (chr M).
     '''
     logging.info('Getting mitochondrial chromosome fraction...')
     chrom_list = pysam.idxstats(sorted_bam_file, split_lines=True)
     tot_reads = 0
+    chr_m_reads = 0
     for chrom in chrom_list:
         chrom_stats = chrom.split('\t')
-        if chrom_stats[0] == 'chrM':
+        if chrom_stats[0] == mito_chr_name:
             chr_m_reads = int(chrom_stats[2])
         tot_reads += int(chrom_stats[2])
-    fract_chr_m = float(chr_m_reads) / tot_reads
+    if tot_reads==0:
+        fract_chr_m = 0
+    else:
+        fract_chr_m = float(chr_m_reads) / tot_reads
 
     return chr_m_reads, fract_chr_m
-
 
 def get_gc(qsorted_bam_file, reference_fasta, prefix):
     '''
@@ -223,13 +223,15 @@ def get_gc(qsorted_bam_file, reference_fasta, prefix):
     MUST be the same fasta file that generated the bowtie indices.
     Assumes picard was already loaded into space (module add picard-tools)
     '''
+    # remove redundant (or malformed) info (read group) from bam
     logging.info('Getting GC bias...')
     output_file = '{0}_gc.txt'.format(prefix)
     plot_file = '{0}_gcPlot.pdf'.format(prefix)
     summary_file = '{0}_gcSummary.txt'.format(prefix)
-    get_gc_metrics = ('java -Xmx4G -jar '
+    get_gc_metrics = ('java -Xmx6G -XX:ParallelGCThreads=1 -jar '
                       '{5} '
                       'CollectGcBiasMetrics R={0} I={1} O={2} '
+                      'USE_JDK_DEFLATER=TRUE USE_JDK_INFLATER=TRUE '
                       'VERBOSITY=ERROR QUIET=TRUE '
                       'ASSUME_SORTED=FALSE '
                       'CHART={3} S={4}').format(reference_fasta,
@@ -356,12 +358,14 @@ def get_picard_complexity_metrics(aligned_bam, prefix):
     '''
     Picard EsimateLibraryComplexity
     '''
+    # remove redundant (or malformed) info (read group) from bam
     out_file = '{0}.picardcomplexity.qc'.format(prefix)
-    get_gc_metrics = ('java -Xmx4G -jar '
+    get_gc_metrics = ('mkdir -p tmp_java && java -Djava.io.tmpdir=$PWD/tmp_java -Xmx6G -XX:ParallelGCThreads=1 -jar '
                       '{2} '
                       'EstimateLibraryComplexity INPUT={0} OUTPUT={1} '
+                      'USE_JDK_DEFLATER=TRUE USE_JDK_INFLATER=TRUE '
                       'VERBOSITY=ERROR '
-                      'QUIET=TRUE').format(aligned_bam,
+                      'QUIET=TRUE && rm -rf tmp_java').format(aligned_bam,
                                            out_file,
                                            locate_picard())
     os.system(get_gc_metrics)
@@ -464,7 +468,10 @@ def make_tss_plot(bam_file, tss, prefix, chromsizes, read_len, bins=400, bp_edge
     tss_point_val = max(bam_array.mean(axis=0))
 
     ax.set_xlabel('Distance from TSS (bp)')
-    ax.set_ylabel('Average read coverage (per million mapped reads)')
+    if greenleaf_norm:
+        ax.set_ylabel('TSS Enrichment')
+    else:
+        ax.set_ylabel('Average read coverage (per million mapped reads)')
     ax.legend(loc='best')
 
     fig.savefig(tss_plot_file)
@@ -511,7 +518,7 @@ def get_picard_dup_stats(picard_dup_file, paired_status):
                 dup_stats['READ_PAIR_DUPLICATES'] = line_elems[5]
                 dup_stats['READ_PAIRS_EXAMINED'] = line_elems[2]
                 if paired_status == 'Paired-ended':
-                    return float(line_elems[5]), float(line_elems[7])
+                    return 2*float(line_elems[5]), float(line_elems[7])
                 else:
                     return float(line_elems[4]), float(line_elems[7])
 
@@ -540,7 +547,7 @@ def get_sambamba_dup_stats(sambamba_dup_file, paired_status):
         return ends_marked_dup, prct_dup
 
 
-def get_mito_dups(sorted_bam, prefix, endedness='Paired-ended', use_sambamba=False):
+def get_mito_dups(sorted_bam, prefix, mito_chr_name, endedness='Paired-ended', use_sambamba=False):
     '''
     Marks duplicates in the original aligned bam file and then determines
     how many reads are duplicates AND from chrM
@@ -564,7 +571,7 @@ def get_mito_dups(sorted_bam, prefix, endedness='Paired-ended', use_sambamba=Fal
     os.system(filter_bam)
 
     # Run Picard MarkDuplicates
-    mark_duplicates = ('java -Xmx4G -jar '
+    mark_duplicates = ('java -Xmx6G -XX:ParallelGCThreads=1 -jar '
                        '{0} '
                        'MarkDuplicates INPUT={1} OUTPUT={2} '
                        'METRICS_FILE={3} '
@@ -572,6 +579,7 @@ def get_mito_dups(sorted_bam, prefix, endedness='Paired-ended', use_sambamba=Fal
                        'ASSUME_SORTED=TRUE '
                        'REMOVE_DUPLICATES=FALSE '
                        'VERBOSITY=ERROR '
+                       'USE_JDK_DEFLATER=TRUE USE_JDK_INFLATER=TRUE '
                        'QUIET=TRUE').format(locate_picard(),
                                             tmp_filtered_bam,
                                             out_file,
@@ -595,7 +603,7 @@ def get_mito_dups(sorted_bam, prefix, endedness='Paired-ended', use_sambamba=Fal
     # Get the mitochondrial reads that are marked duplicates
     mito_dups = int(subprocess.check_output(['samtools',
                                              'view', '-f', '1024',
-                                             '-c', out_file, 'chrM']).strip())
+                                             '-c', out_file, mito_chr_name]).strip())
 
     total_dups = int(subprocess.check_output(['samtools',
                                               'view', '-f', '1024',
@@ -627,6 +635,21 @@ def get_samtools_flagstat(bam_file):
     return flagstat, mapped_reads
 
 
+def get_mapped_count(bam_file):
+    """run samtools view, removing unmapped (0x4) and nonprimary (0x100)
+    """
+    # Current bug in pysam.view module...
+    logging.info("getting mapped count...")
+
+    # There is a bug in pysam.view('-c'), so just use subprocess
+    num_mapped = int(subprocess.check_output(
+        ["samtools", "view",
+         "-F", "260", "-c",
+         bam_file]).strip())
+    
+    return num_mapped
+
+
 def get_fract_mapq(bam_file, q=30):
     '''
     Runs samtools view to get the fraction of reads of a certain
@@ -636,12 +659,14 @@ def get_fract_mapq(bam_file, q=30):
     logging.info('samtools mapq 30...')
 
     # There is a bug in pysam.view('-c'), so just use subprocess
-    num_qreads = int(subprocess.check_output(['samtools',
-                                              'view', '-c',
-                                              '-q', str(q), bam_file]).strip())
-    tot_reads = int(subprocess.check_output(['samtools',
-                                             'view', '-c',
-                                             bam_file]).strip())
+    num_qreads = int(subprocess.check_output(
+        ["samtools", "view",
+         "-F", "256", "-c",
+         '-q', str(q), bam_file]).strip())
+    tot_reads = int(subprocess.check_output(
+        ["samtools", "view",
+         "-F", "256", "-c",
+         bam_file]).strip())
     fract_good_mapq = float(num_qreads)/tot_reads
     return num_qreads, fract_good_mapq
 
@@ -652,12 +677,14 @@ def get_final_read_count(first_bam, last_bam):
     '''
     logging.info('final read counts...')
     # Bug in pysam.view
-    num_reads_last_bam = int(subprocess.check_output(['samtools',
-                                                      'view', '-c',
-                                                      last_bam]).strip())
-    num_reads_first_bam = int(subprocess.check_output(['samtools',
-                                                       'view', '-c',
-                                                       first_bam]).strip())
+    num_reads_last_bam = int(subprocess.check_output(
+        ["samtools", "view",
+         "-F", "256", "-c",
+         last_bam]).strip())
+    num_reads_first_bam = int(subprocess.check_output(
+        ["samtools", "view",
+         "-F", "256", "-c",
+         first_bam]).strip())
     fract_reads_left = float(num_reads_last_bam)/num_reads_first_bam
 
     return num_reads_first_bam, num_reads_last_bam, fract_reads_left
@@ -670,11 +697,12 @@ def get_insert_distribution(final_bam, prefix):
     logging.info('insert size distribution...')
     insert_data = '{0}.inserts.hist_data.log'.format(prefix)
     insert_plot = '{0}.inserts.hist_graph.pdf'.format(prefix)
-    graph_insert_dist = ('java -Xmx4G -jar '
+    graph_insert_dist = ('java -Xmx6G -XX:ParallelGCThreads=1 -jar '
                          '{3} '
                          'CollectInsertSizeMetrics '
                          'INPUT={0} OUTPUT={1} H={2} '
                          'VERBOSITY=ERROR QUIET=TRUE '
+                         'USE_JDK_DEFLATER=TRUE USE_JDK_INFLATER=TRUE '
                          'W=1000 STOP_AFTER=5000000').format(final_bam,
                                                              insert_data,
                                                              insert_plot,
@@ -835,7 +863,7 @@ def get_peak_counts(raw_peaks, naive_overlap_peaks=None, idr_peaks=None):
 
     # Literally just throw these into a QC table
     results = []
-    results.append(QCGreaterThanEqualCheck('Raw peaks', 10000)(raw_count))
+    # results.append(QCGreaterThanEqualCheck('Raw peaks', 10000)(raw_count))
     results.append(QCGreaterThanEqualCheck('Naive overlap peaks',
                                            10000)(naive_count))
     results.append(QCGreaterThanEqualCheck('IDR peaks', 10000)(idr_count))
@@ -883,23 +911,29 @@ def fragment_length_qc(data):
     MONO_NUC_UPPER_LIMIT = 300
 
     # % of NFR vs res
-    percent_nfr = data[:NFR_UPPER_LIMIT].sum() / data.sum()
+    nfr_reads = data[data[:,0] < NFR_UPPER_LIMIT][:,1]
+    percent_nfr = nfr_reads.sum() / data[:,1].sum()
     results.append(
         QCGreaterThanEqualCheck('Fraction of reads in NFR', 0.4)(percent_nfr))
 
     # % of NFR vs mononucleosome
+    mono_nuc_reads = data[
+        (data[:,0] > MONO_NUC_LOWER_LIMIT) &
+        (data[:,0] <= MONO_NUC_UPPER_LIMIT)][:,1]
+    
     percent_nfr_vs_mono_nuc = (
-        data[:NFR_UPPER_LIMIT].sum() /
-        data[MONO_NUC_LOWER_LIMIT:MONO_NUC_UPPER_LIMIT + 1].sum())
+        nfr_reads.sum() /
+        mono_nuc_reads.sum())
     results.append(
         QCGreaterThanEqualCheck('NFR / mono-nuc reads', 2.5)(
             percent_nfr_vs_mono_nuc))
 
     # peak locations
+    pos_start_val = data[0,0] # this may be greater than 0
     peaks = find_peaks_cwt(data[:, 1], np.array([25]))
-    nuc_range_metrics = [('Presence of NFR peak', 20, 90),
-                         ('Presence of Mono-Nuc peak', 120, 250),
-                         ('Presence of Di-Nuc peak', 300, 500)]
+    nuc_range_metrics = [('Presence of NFR peak', 20 - pos_start_val, 90 - pos_start_val),
+                         ('Presence of Mono-Nuc peak', 120 - pos_start_val, 250 - pos_start_val),
+                         ('Presence of Di-Nuc peak', 300 - pos_start_val, 500 - pos_start_val)]
     for range_metric in nuc_range_metrics:
         results.append(QCHasElementInRange(*range_metric)(peaks))
 
@@ -1063,7 +1097,7 @@ html_template = Template("""
 <body>
   <h2>ATAqC</h2>
 
-
+{% if 'basic_info' in sample %}
   <h2>Sample Information</h2>
   <table class='qc_table'>
     <tbody>
@@ -1075,8 +1109,9 @@ html_template = Template("""
       {% endfor %}
     </tbody>
   </table>
+{% endif %}
 
-
+{% if 'summary_stats' in sample %}
   <h2>Summary</h2>
   <table class='qc_table'>
     <tbody>
@@ -1095,7 +1130,9 @@ end read. In other words, if your file is paired end, then you should divide
 these counts by two. Each step follows the previous step; for example, the
 duplicate reads were removed after reads were removed for low mapping quality.
 </pre>
+{% endif %}
 
+{% if 'read_tracker' in sample %}
   {{ inline_img(sample['read_tracker']) }}
 <pre>
 This bar chart also shows the filtering process and where the reads were lost
@@ -1106,20 +1143,29 @@ determined using 'samtools view' - as such, these are all reads found in
 the file, whether one end of a pair or a single end read. In other words,
 if your file is paired end, then you should divide these counts by two.
 </pre>
+{% endif %}
 
-
+{% if 'bowtie_stats' in sample %}
   <h2>Alignment statistics</h2>
   <h3>Bowtie alignment log</h3>
   <pre>
 {{ sample['bowtie_stats'] }}
   </pre>
+{% endif %}
 
+{% if 'samtools_flagstat' in sample %}
   <h3>Samtools flagstat</h3>
   <pre>
 {{ sample['samtools_flagstat'] }}
   </pre>
+<pre>
+Note that the flagstat command counts alignments, not reads. please 
+use the read counts table to get accurate counts of reads at each
+stage of the pipeline.
+</pre>
+{% endif %}
 
-
+{% if 'filtering_stats' in sample %}
   <h2>Filtering statistics</h2>
   <table class='qc_table'>
     <tbody>
@@ -1142,8 +1188,9 @@ assays because the mitochondrial genome is very open. A high mitochondrial
 fraction is an indication of poor libraries. Based on prior experience, a
 final read fraction above 0.70 is a good library.
   </pre>
+{% endif %}
 
-
+{% if 'encode_lib_complexity' in sample %}
   <h2>Library complexity statistics</h2>
   <h3>ENCODE library complexity metrics</h3>
   {{ qc_table(sample['encode_lib_complexity']) }}
@@ -1160,11 +1207,14 @@ the ratio of genomic locations with EXACTLY one read pair over the genomic
 locations with EXACTLY two read pairs. The PBC2 should be significantly
 greater than 1.
 </pre>
+{% endif %}
 
+{% if 'picard_est_library_size' in sample %}
   <h3>Picard EstimateLibraryComplexity</h3>
   {{ '{0:,}'.format(sample['picard_est_library_size']) }}
+{% endif %}
 
-
+{% if 'yield_prediction' in sample %}
   <h3>Yield prediction</h3>
   {% if sample['yield_prediction'] == 'Tm9uZQ==' %}
     {{ 'Preseq did not converge (or failed in some other way)'}}
@@ -1177,8 +1227,9 @@ number of distinct reads, and then extrapolating out to see where the
 expected number of distinct reads no longer increases. The confidence interval
 gives a gauge as to the validity of the yield predictions.
 </pre>
+{% endif %}
 
-
+{% if 'fraglen_dist' in sample and 'nucleosomal' in sample %}
   <h2>Fragment length statistics</h2>
   {{ inline_img(sample['fraglen_dist']) }}
   {{ qc_table(sample['nucleosomal']) }}
@@ -1190,9 +1241,15 @@ fragment lengths will arise. Good libraries will show these peaks in a
 fragment length distribution and will show specific peak ratios.
 </pre>
 
-  <h2>Peak statistics</h2>
-  {{ qc_table(sample['peak_counts']) }}
+{% endif %}
 
+  <h2>Peak statistics</h2>
+
+{% if 'peak_counts' in sample %}
+  {{ qc_table(sample['peak_counts']) }}
+{% endif %}
+
+{% if 'raw_peak_summ' in sample %}
   <h3>Raw peak file statistics</h3>
   <table class='qc_table'>
     <tbody>
@@ -1204,9 +1261,13 @@ fragment length distribution and will show specific peak ratios.
       {% endfor %}
     </tbody>
   </table>
+{% endif %}
 
+{% if 'raw_peak_dist' in sample %}
   {{ inline_img(sample['raw_peak_dist']) }}
+{% endif %}
 
+{% if 'naive_peak_summ' in sample %}
   <h3>Naive overlap peak file statistics</h3>
 
   <table class='qc_table'>
@@ -1219,9 +1280,13 @@ fragment length distribution and will show specific peak ratios.
       {% endfor %}
     </tbody>
   </table>
+{% endif %}
 
+{% if 'naive_peak_dist' in sample %}
   {{ inline_img(sample['naive_peak_dist']) }}
+{% endif %}
 
+{% if 'idr_peak_summ' in sample %}
   <h3>IDR peak file statistics</h3>
 
   <table class='qc_table'>
@@ -1234,15 +1299,19 @@ fragment length distribution and will show specific peak ratios.
       {% endfor %}
     </tbody>
   </table>
+{% endif %}
 
+{% if 'idr_peak_dist' in sample %}
   {{ inline_img(sample['idr_peak_dist']) }}
 
 <pre>
 For a good ATAC-seq experiment in human, you expect to get 100k-200k peaks
 for a specific cell type.
 </pre>
+{% endif %}
 
 
+{% if 'gc_bias' in sample %}
   <h2>Sequence quality metrics</h2>
   <h3>GC bias</h3>
   {{ inline_img(sample['gc_bias']) }}
@@ -1250,18 +1319,23 @@ for a specific cell type.
 Open chromatin assays are known to have significant GC bias. Please take this
 into consideration as necessary.
 </pre>
+{% endif %}
 
-
+{% if 'enrichment_plots' in sample or 'annot_enrichments' in sample %}
   <h2>Annotation-based quality metrics</h2>
+{% endif %}
 
+{% if 'enrichment_plots' in sample %}
   <h3>Enrichment plots (TSS)</h3>
   {{ inline_img(sample['enrichment_plots']['tss']) }}
   <pre>
 Open chromatin assays should show enrichment in open chromatin sites, such as
-TSS's. An average TSS enrichment is above 6-7. A strong TSS enrichment is
-above 10.
+TSS's. An average TSS enrichment in human (hg19) is above 6. A strong TSS enrichment is
+above 10. For other references please see https://www.encodeproject.org/atac-seq/
   </pre>
+{% endif %}
 
+{% if 'annot_enrichments' in sample %}
   <h3>Annotated genomic region enrichments</h3>
   <table class='qc_table'>
     <tbody>
@@ -1283,8 +1357,9 @@ fall into the promoter regions. A high set (though not all) should fall into
 the enhancer regions. The promoter regions should not take up all reads, as
 it is known that there is a bias for promoters in open chromatin assays.
 </pre>
+{% endif %}
 
-
+{% if 'roadmap_plot' in sample %}
   <h2>Comparison to Roadmap DNase</h2>
   {{ inline_img(sample['roadmap_plot']) }}
 <pre>
@@ -1293,6 +1368,7 @@ your sample, when the signal in the universal DNase peak region sets are
 compared. The closer the sample is in signal distribution in the regions
 to your sample, the higher the correlation.
 </pre>
+{% endif %}
 
 
 </body>
@@ -1428,6 +1504,7 @@ def main():
      ROADMAP_META, GENOME, CHROMSIZES, FASTQ, ALIGNED_BAM, ALIGNMENT_LOG, COORDSORT_BAM,
      DUP_LOG, PBC_LOG, FINAL_BAM, FINAL_BED, BIGWIG, PEAKS,
      NAIVE_OVERLAP_PEAKS, IDR_PEAKS, USE_SAMBAMBA_MARKDUP] = parse_args()
+    MITO_CHR_NAME = 'chrM'
 
     # Set up the log file and timing
     logging.basicConfig(filename='test.log', level=logging.DEBUG)
@@ -1441,7 +1518,7 @@ def main():
 
     # Sequencing metrics: Bowtie1/2 alignment log, chrM, GC bias
     BOWTIE_STATS = get_bowtie_stats(ALIGNMENT_LOG)
-    chr_m_reads, fraction_chr_m = get_chr_m(COORDSORT_BAM)
+    chr_m_reads, fraction_chr_m = get_chr_m(COORDSORT_BAM, MITO_CHR_NAME)
     gc_out, gc_plot, gc_summary = get_gc(FINAL_BAM,
                                          REF,
                                          OUTPUT_PREFIX)
@@ -1465,10 +1542,12 @@ def main():
 
     mito_dups, fract_dups_from_mito = get_mito_dups(ALIGNED_BAM,
                                                     OUTPUT_PREFIX,
+                                                    MITO_CHR_NAME,
                                                     paired_status,
                                                     use_sambamba=USE_SAMBAMBA_MARKDUP)
-    [flagstat, mapped_count] = get_samtools_flagstat(ALIGNED_BAM)
-
+    flagstat, _ = get_samtools_flagstat(ALIGNED_BAM)
+    mapped_count = get_mapped_count(ALIGNED_BAM)
+    
     # Final read statistics
     first_read_count, final_read_count, \
         fract_reads_left = get_final_read_count(ALIGNED_BAM,

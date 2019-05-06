@@ -7,6 +7,7 @@ from collections import OrderedDict
 
 def parse_flagstat_qc(txt):
     result = OrderedDict()
+    if not txt: return result
     total = ''
     total_qc_failed = ''
     duplicates = ''
@@ -115,7 +116,10 @@ def parse_flagstat_qc(txt):
     if mapped_qc_failed:
         result['mapped_qc_failed'] = int(mapped_qc_failed)
     if mapped_pct:
-        result['mapped_pct'] = float(mapped_pct)
+        if mapped_pct!='N/A' and not 'nan' in mapped_pct:
+            result['mapped_pct'] = float(mapped_pct)
+        else:
+            result['mapped_pct'] = 0.0
     if paired:
         result['paired'] = int(paired)
     if paired_qc_failed:
@@ -158,6 +162,7 @@ def parse_flagstat_qc(txt):
 
 def parse_dup_qc(txt):
     result = OrderedDict()
+    if not txt: return result
     paired_reads = ''
     unpaired_reads = ''
     unmapped_reads = ''
@@ -173,7 +178,7 @@ def parse_dup_qc(txt):
         content = ''
         for line in f:
             if header:
-                content = line
+                content = line.replace(',','.')
                 picard_log_found = True
                 break
             if 'UNPAIRED_READS_EXAMINED' in line:
@@ -214,7 +219,7 @@ def parse_dup_qc(txt):
                 if paired_reads == '0': # SE
                     dupes_pct = '{0:.2f}'.format(
                                 float(unpaired_dupes)/float(unpaired_reads))
-                else:
+                elif paired_reads:
                     dupes_pct = '{0:.2f}'.format(
                                 float(paired_dupes)/float(paired_reads))
     if unpaired_reads:
@@ -233,23 +238,37 @@ def parse_dup_qc(txt):
         result['dupes_pct'] = float(dupes_pct)
     return result
 
+def int_or_none(var):
+    try:
+        return int(var)
+    except ValueError:
+        return None
+
+def float_or_none(var):
+    try:
+        return float(var)
+    except ValueError:
+        return None
+
 def parse_pbc_qc(txt):
     result = OrderedDict()
+    if not txt: return result
     with open(txt, 'r') as f:
         for line in f:
             arr = line.strip().split('\t')
             break
-    result['total_read_pairs'] = int(arr[0])
-    result['distinct_read_pairs'] = int(arr[1])
-    result['one_read_pair'] = int(arr[2])
-    result['two_read_pair'] = int(arr[3])
-    result['NRF'] = float(arr[4])
-    result['PBC1'] = float(arr[5])
-    result['PBC2'] = float(arr[6])
+    result['total_read_pairs'] = int_or_none(arr[0])
+    result['distinct_read_pairs'] = int_or_none(arr[1])
+    result['one_read_pair'] = int_or_none(arr[2])
+    result['two_read_pair'] = int_or_none(arr[3])
+    result['NRF'] = float_or_none(arr[4])
+    result['PBC1'] = float_or_none(arr[5])
+    result['PBC2'] = float_or_none(arr[6])
     return result
 
 def parse_xcor_score(txt):
     result = OrderedDict()
+    if not txt: return result
     with open(txt, 'r') as f:
         arr = f.readlines()[0].strip().split('\t')
     result['num_reads'] = int(arr[1])
@@ -265,6 +284,7 @@ def parse_xcor_score(txt):
 
 def parse_jsd_qc(txt):
     result = OrderedDict()
+    if not txt: return result
     with open(txt, 'r') as f:
         arr = f.readlines()[0].strip().split('\t')
     result['pct_gen_enrich'] = float(arr[0])
@@ -275,12 +295,13 @@ def parse_jsd_qc(txt):
     result['syn_auc'] = float(arr[5])
     result['syn_elbow_pt'] = float(arr[6])
     result['syn_jsd'] = float(arr[7])
-    result['syn_x_intcpt'] = float(arr[8])
-    result['x_intcpt'] = float(arr[9])
-    result['diff_enrich'] = float(arr[10])
+    # result['syn_x_intcpt'] = float(arr[8])
+    # result['x_intcpt'] = float(arr[9])
+    # result['diff_enrich'] = float(arr[10])
     return result
 
 def parse_reproducibility_qc(txt):
+    if not txt: return OrderedDict()
     with open(txt, 'r') as f:
         lines = f.readlines()
         header = lines[0].strip()
@@ -296,26 +317,57 @@ def parse_reproducibility_qc(txt):
 
 def parse_frip_qc(txt):
     result = OrderedDict()
+    if not txt: return result
     with open(txt, 'r') as f:
         frip = f.readlines()[0].strip()
     result['FRiP'] = float(frip)
     return result
 
-def parse_multi_col_txt(txt): # to read ATAQC log
+def parse_multi_col_txt(txt):
     result = OrderedDict()
+    if not txt: return result
     with open(txt, 'r') as f:
         lines = f.readlines()    
     for line in lines:
         line = line.strip().replace(' reads; of these:','')
         arr = line.split('\t')
-        for j in range(1,len(arr)):
-            header = arr[0] 
-            header += '' if len(arr)==2 else '-{}'.format(j)
-            content = arr[j]
-            result[header] = content
+        header = arr[0]
+        if len(arr)==2:
+            result[header] = arr[1]
+        elif len(arr)>2:
+            result[header] = arr[1:]
     return result
 
-def get_long_keyname(key, paired_end=False):
+def parse_ataqc_txt(txt): # to read ATAQC log
+    def num(s): # try to parse a number string (int->float->string)
+        try:
+            # not implemented
+            if '.' in s:
+                return float(s.strip())
+            else:
+                return int(s.strip())
+        except ValueError:
+            return s.strip()            
+    pre_parsed = parse_multi_col_txt(txt)
+    result = OrderedDict()
+    if not txt: return result
+    for key in pre_parsed:
+        val = pre_parsed[key]
+        if type(val)==list:
+            result[key] = [num(x) for x in val]
+        elif '- OK' in val:    
+            delim = '- OK'
+            arr = val.split(delim)
+            result[key] = [num(arr[0]), 'OK']
+        elif 'out of range' in val:
+            delim = 'out of range'
+            arr = val.split(delim)
+            result[key] = [num(arr[0]), '{}{}'.format(delim,arr[1])]
+        else:
+            result[key] = num(val)
+    return result
+
+def get_long_keyname(key): #, paired_end=False):
     short_to_long = {
         'total' : 'Total',
         'total_qc_failed' : 'Total(QC-failed)',
@@ -378,30 +430,38 @@ def get_long_keyname(key, paired_end=False):
         'syn_jsd' : 'Synthetic JS Distance',
         'syn_x_intcpt' : 'Synthetic X-intercept',
         'x_intcpt' : 'X-intercept',
-        'diff_enrich' : 'diff. enrichment'}
-
-    short_to_long_se = {
-        'total_read_pairs' : 'Total Reads',
-        'distinct_read_pairs' : 'Distinct Reads',
-        'one_read_pair' : 'One Read',
-        'two_read_pair' : 'Two Reads',
-        'NRF' : 'NRF = Distinct/Total',
-        'PBC1' : 'PBC1 = OneRead/Distinct',
-        'PBC2' : 'PBC2 = OneRead/TwoReads',}
-
-    short_to_long_pe = {
-        'total_read_pairs' : 'Total Read Pairs',
-        'distinct_read_pairs' : 'Distinct Read Pairs',
-        'one_read_pair' : 'One Read Pair',
-        'two_read_pair' : 'Two Read Pairs',
+        'diff_enrich' : 'diff. enrichment',
+        'total_read_pairs' : 'Total Reads (Pairs)',
+        'distinct_read_pairs' : 'Distinct Reads (Pairs)',
+        'one_read_pair' : 'One Read (Pair)',
+        'two_read_pair' : 'Two Reads (Pairs)',
         'NRF' : 'NRF = Distinct/Total',
         'PBC1' : 'PBC1 = OnePair/Distinct',
-        'PBC2' : 'PBC2 = OnePair/TwoPair',}
+        'PBC2' : 'PBC2 = OnePair/TwoPair'
+    }
+
+    # short_to_long_se = {
+    #     'total_read_pairs' : 'Total Reads',
+    #     'distinct_read_pairs' : 'Distinct Reads',
+    #     'one_read_pair' : 'One Read',
+    #     'two_read_pair' : 'Two Reads',
+    #     'NRF' : 'NRF = Distinct/Total',
+    #     'PBC1' : 'PBC1 = OneRead/Distinct',
+    #     'PBC2' : 'PBC2 = OneRead/TwoReads',}
+
+    # short_to_long_pe = {
+    #     'total_read_pairs' : 'Total Read Pairs',
+    #     'distinct_read_pairs' : 'Distinct Read Pairs',
+    #     'one_read_pair' : 'One Read Pair',
+    #     'two_read_pair' : 'Two Read Pairs',
+    #     'NRF' : 'NRF = Distinct/Total',
+    #     'PBC1' : 'PBC1 = OnePair/Distinct',
+    #     'PBC2' : 'PBC2 = OnePair/TwoPair',}
 
     if key in short_to_long:
         return short_to_long[key]
-    if paired_end and key in short_to_long_pe:
-        return short_to_long_pe[key]
-    if not paired_end and key in short_to_long_se:
-        return short_to_long_se[key]
-    return key
+    # if paired_end and key in short_to_long_pe:
+    #     return short_to_long_pe[key]
+    # if not paired_end and key in short_to_long_se:
+    #     return short_to_long_se[key]
+    return key.replace('_',' ').capitalize()

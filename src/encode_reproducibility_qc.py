@@ -8,6 +8,7 @@ import os
 import argparse
 import multiprocessing
 from encode_common import *
+from encode_common_genomic import peak_to_bigbed, peak_to_hammock
 
 def parse_arguments():
     parser = argparse.ArgumentParser(prog='ENCODE DCC reproducibility QC.',
@@ -22,6 +23,13 @@ def parse_arguments():
                         help='List of peak files from pseudo replicates.')
     parser.add_argument('--peak-ppr', type=str,
                         help='Peak file from pooled pseudo replicate.')
+    parser.add_argument('--peak-type', type=str, default='narrowPeak',
+                        choices=['narrowPeak','regionPeak','broadPeak','gappedPeak'],
+                        help='Peak file type.')
+    parser.add_argument('--chrsz', type=str,
+                        help='2-col chromosome sizes file.')
+    parser.add_argument('--keep-irregular-chr', action="store_true",
+                        help='Keep reads with non-canonical chromosome names.')    
     parser.add_argument('--prefix', type=str,
                         help='Basename prefix for reproducibility QC file.')
     parser.add_argument('--out-dir', default='', type=str,
@@ -33,7 +41,7 @@ def parse_arguments():
     args = parser.parse_args()
     if len(args.peaks_pr)!=infer_n_from_nC2(len(args.peaks)):
         raise argparse.ArgumentTypeError(
-            'Invalid number of peak files or --peak-pr.')
+            'Invalid number of peak files or --peaks-pr.')
 
     log.setLevel(args.log_level)
     log.info(sys.argv)
@@ -85,8 +93,7 @@ def main():
         self_consistency_ratio = 1.0
 
         conservative_set = 'rep1-pr'
-        conservative_peak = make_hard_link(
-                args.peaks_pr[0], args.out_dir)
+        conservative_peak = make_hard_link(args.peaks_pr[0], args.out_dir)
         N_conservative = N[0]
         optimal_set = conservative_set
         optimal_peak = conservative_peak
@@ -99,8 +106,19 @@ def main():
         reproducibility = 'fail'
 
     log.info('Writing optimal/conservative peak files...')
-    copy_f_to_f(optimal_peak, os.path.join(args.out_dir, 'optimal_peak.gz'))
-    copy_f_to_f(conservative_peak, os.path.join(args.out_dir, 'conservative_peak.gz'))
+    optimal_peak_file = os.path.join(args.out_dir, 'optimal_peak.{}.gz'.format(args.peak_type))
+    conservative_peak_file = os.path.join(args.out_dir, 'conservative_peak.{}.gz'.format(args.peak_type))
+    copy_f_to_f(optimal_peak, optimal_peak_file)
+    copy_f_to_f(conservative_peak, conservative_peak_file)
+
+    if args.chrsz:
+        log.info('Converting peak to bigbed...')
+        peak_to_bigbed(optimal_peak_file, args.peak_type, args.chrsz, args.keep_irregular_chr, args.out_dir)
+        peak_to_bigbed(conservative_peak_file, args.peak_type, args.chrsz, args.keep_irregular_chr, args.out_dir)
+
+        log.info('Converting peak to hammock...')
+        peak_to_hammock(optimal_peak_file, args.keep_irregular_chr, args.out_dir)
+        peak_to_hammock(conservative_peak_file, args.keep_irregular_chr, args.out_dir)
 
     log.info('Writing reproducibility QC log...')
     if args.prefix:
